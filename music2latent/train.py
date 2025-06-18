@@ -18,6 +18,8 @@ from .models import *
 from .data import *
 from .audio import *
 
+os.environ["CUDA_VISIBLE_DEVICES=0"] = 0
+
 if hparams.torch_compile_cache_dir is not None:
     os.environ["TORCHINDUCTOR_CACHE_DIR"] = hparams.torch_compile_cache_dir
 
@@ -47,7 +49,7 @@ class Trainer:
         self.get_models()
         self.switch_save_checkpoint = True
         self.step = 0
-        
+
         # INITIALIZE CHECKPOINT FOLDER
         if misc.get_rank()==0:
             if self.save_path is None:
@@ -68,7 +70,7 @@ class Trainer:
                 fdata, fdata_plus_one = self.ddp(data_encoder, noisy_samples, noisy_samples_plus_one, sigmas_step, sigmas)
             else:
                 fdata, fdata_plus_one = self.gen(data_encoder, noisy_samples, noisy_samples_plus_one, sigmas_step, sigmas)
-            
+
             loss_weight = get_loss_weight(sigmas, sigmas_step)
             loss = huber(fdata,fdata_plus_one,loss_weight)
         return loss
@@ -81,7 +83,7 @@ class Trainer:
 
         step = get_step_schedule(min(self.it,hparams.total_iters))
         self.step = step
-        
+
         if hparams.use_lognormal:
             arbitrary_high_number = 10000
             w = get_sampling_weights(arbitrary_high_number, device=data.device)
@@ -89,11 +91,11 @@ class Trainer:
             inds = (inds+torch.rand_like(inds))/float(arbitrary_high_number-1)
         else:
             inds = torch.rand((data.shape[0],), dtype=torch.float32, device=data.device)
-            
+
         sigmas = get_sigma_continuous(inds)
         inds_step = get_step_continuous(inds, step)
         sigmas_step = get_sigma_continuous(inds_step)
-        
+
         noises = torch.randn_like(data)
         noisy_samples = add_noise(data, noises, sigmas_step)
         noisy_samples_plus_one = add_noise(data, noises, sigmas)
@@ -108,7 +110,7 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
             self.optimizer.zero_grad(set_to_none=True)
-        
+
         if hparams.enable_ema and misc.get_rank()==0:
             self.ema.update()
 
@@ -138,7 +140,7 @@ class Trainer:
             for batchi,(x) in enumerate(pbar):
 
                 self.update_learning_rate()
-                
+
                 loss = self.train_it(x.to(self.device))
                 if misc.get_rank()==0:
                     self.writer.add_scalar('epoch', self.epoch, self.it)
@@ -150,7 +152,7 @@ class Trainer:
 
                 if batchi%100==0 and misc.get_rank()==0:
                     pbar.set_postfix({'loss': np.mean(loss_list[-g:], axis=0)})
-            
+
             self.epoch = self.epoch + 1
             if misc.get_rank()==0:
                 self.calculate_fad(hparams.inference_diffusion_steps)
@@ -182,65 +184,67 @@ class Trainer:
                 new_learning_rate = hparams.lr
             else:
                 raise ValueError('lr_decay must be None, "cosine", "linear", or "inverse_sqrt"')
-            
+
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = new_learning_rate
 
     def test_model(self):
         self.gen.eval()
-        max_steps = hparams.inference_diffusion_steps
-
-        num_examples = 4
-        original,reconstructed = encode_decode(self.gen, self.ds_test, num_examples)
-        if len(original[0].shape)==2:
-            original = [el[0,:] for el in original]
-        if len(reconstructed[0].shape)==2:
-            reconstructed = [el[0,:] for el in reconstructed]
-        fig = plot_audio_compare(original,reconstructed)
-        fig.suptitle(f'{max_steps} steps')
-        if self.writer is not None:
-            for ind in range(num_examples):
-                self.writer.add_audio(f"original_{ind}", original[ind].detach().cpu().squeeze().numpy(), global_step=self.it, sample_rate=hparams.sample_rate)
-                self.writer.add_audio(f"reconstructed_{ind}", reconstructed[ind].detach().cpu().squeeze().numpy(), global_step=self.it, sample_rate=hparams.sample_rate)
-            self.writer.add_figure(f"figs/{max_steps}_steps", fig, global_step=self.it)
-        plt.close()
+        # max_steps = hparams.inference_diffusion_steps
+        #
+        # num_examples = 4
+        # original,reconstructed = encode_decode(self.gen, self.ds_test, num_examples)
+        # if len(original[0].shape)==2:
+        #     original = [el[0,:] for el in original]
+        # if len(reconstructed[0].shape)==2:
+        #     reconstructed = [el[0,:] for el in reconstructed]
+        # fig = plot_audio_compare(original,reconstructed)
+        # fig.suptitle(f'{max_steps} steps')
+        # if self.writer is not None:
+        #     for ind in range(num_examples):
+        #         self.writer.add_audio(f"original_{ind}", original[ind].detach().cpu().squeeze().numpy(), global_step=self.it, sample_rate=hparams.sample_rate)
+        #         self.writer.add_audio(f"reconstructed_{ind}", reconstructed[ind].detach().cpu().squeeze().numpy(), global_step=self.it, sample_rate=hparams.sample_rate)
+        #     self.writer.add_figure(f"figs/{max_steps}_steps", fig, global_step=self.it)
+        # plt.close()
         self.gen.train()
 
     def save_batch_to_wav(self, batch):
-        print('Saving audio samples...')
-        self.final_fad_path = os.path.join(self.save_path, hparams.eval_samples_path)
-        os.makedirs(self.final_fad_path, exist_ok=True)
-        for i in range(len(batch)):
-            audio_data = batch[i].numpy()
-            if len(audio_data.shape)==2:
-                audio_data = audio_data[0]
-            audio_data = (audio_data * 32767.0).astype(np.int16)  # Scale to 16-bit PCM range
-            audio_file_path = os.path.join(self.final_fad_path, f'audio_{i}.wav')
-            # Save the audio file
-            write(audio_file_path, hparams.sample_rate, audio_data)
-            
+        pass
+        # print('Saving audio samples...')
+        # self.final_fad_path = os.path.join(self.save_path, hparams.eval_samples_path)
+        # os.makedirs(self.final_fad_path, exist_ok=True)
+        # for i in range(len(batch)):
+        #     audio_data = batch[i].numpy()
+        #     if len(audio_data.shape)==2:
+        #         audio_data = audio_data[0]
+        #     audio_data = (audio_data * 32767.0).astype(np.int16)  # Scale to 16-bit PCM range
+        #     audio_file_path = os.path.join(self.final_fad_path, f'audio_{i}.wav')
+        #     # Save the audio file
+        #     write(audio_file_path, hparams.sample_rate, audio_data)
+
     def calculate_fad(self, diffusion_steps=1, log=True):
-        if hparams.enable_ema:
-            with self.ema.average_parameters():
-                self.gen.eval()
-                samples = encode_decode_batch(self.gen, self.ds_test, hparams.num_samples_fad, diffusion_steps=diffusion_steps)
-                self.gen.train()
-        else:
-            self.gen.eval()
-            samples = encode_decode_batch(self.gen, self.ds_test, hparams.num_samples_fad, diffusion_steps=diffusion_steps)
-            self.gen.train()
-        self.save_batch_to_wav(samples)
-        score = fad_utils.compute_fad(self.final_fad_path)
-        print(f'FAD: {score}')
-        if log:
-            for i in range(len(hparams.fad_models)):
-                self.writer.add_scalar(f'fad_{hparams.fad_models[i]}', score[i], self.it)
-        score = score[0]
-        self.current_score = score
-        if score<=self.score:
-            self.switch_save_checkpoint = True
-            self.score = score
-            
+        pass
+        # if hparams.enable_ema:
+        #     with self.ema.average_parameters():
+        #         self.gen.eval()
+        #         samples = encode_decode_batch(self.gen, self.ds_test, hparams.num_samples_fad, diffusion_steps=diffusion_steps)
+        #         self.gen.train()
+        # else:
+        #     self.gen.eval()
+        #     samples = encode_decode_batch(self.gen, self.ds_test, hparams.num_samples_fad, diffusion_steps=diffusion_steps)
+        #     self.gen.train()
+        # self.save_batch_to_wav(samples)
+        # score = fad_utils.compute_fad(self.final_fad_path)
+        # print(f'FAD: {score}')
+        # if log:
+        #     for i in range(len(hparams.fad_models)):
+        #         self.writer.add_scalar(f'fad_{hparams.fad_models[i]}', score[i], self.it)
+        # score = score[0]
+        # self.current_score = score
+        # if score<=self.score:
+        #     self.switch_save_checkpoint = True
+        #     self.score = score
+
     def save_checkpoint(self, loss):
         old_checkpoint_list = glob.glob(os.path.join(self.save_path, '*.pt'))
 
@@ -270,7 +274,7 @@ class Trainer:
             for el in old_checkpoint_list:
                 if os.path.basename(el)!=os.path.basename(self.best_checkpoint_path):
                     os.remove(el)
-        
+
     def save_checkpoint_clean(self):
         os.makedirs(hparams.clean_path, exist_ok=True)
         save_dict = {
@@ -316,13 +320,13 @@ class Trainer:
         epoch = 0
         score = 1e7
         best_checkpoint_path = ''
-        
+
         if hparams.load_path is not None:
             checkpoint = torch.load(hparams.load_path, map_location=torch.device('cpu'), weights_only=False)
             self.load_matching_weights(gen, checkpoint['gen_state_dict'])
             if hparams.load_optimizer:
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            # scaler.load_state_dict(checkpoint['scaler_state_dict'])
             if hparams.load_ema:
                 ema.load_state_dict(checkpoint['ema_state_dict'])
             if hparams.load_iter:
@@ -336,7 +340,7 @@ class Trainer:
         if misc.get_rank()==0:
             total_params = sum(p.numel() for p in gen.parameters() if p.requires_grad)
             print(f"Total number of trainable parameters in Generator: {total_params}")
-        
+
         self.optimizer = optimizer
         self.scaler = scaler
         self.ema = ema
