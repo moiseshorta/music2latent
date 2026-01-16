@@ -2,6 +2,7 @@ import os
 from os import path as ospath
 from huggingface_hub import hf_hub_download
 import torch
+from contextlib import nullcontext
 
 from .hparams import *
 
@@ -70,7 +71,9 @@ def reverse_step(x, noise, sigma):
 def denoise(model, noisy_samples, sigma, latents=None):
     # Denoise samples
     with torch.no_grad():
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=mixed_precision):
+        device_type = noisy_samples.device.type
+        autocast_ctx = torch.autocast(device_type='cuda', dtype=torch.float16, enabled=mixed_precision) if device_type == 'cuda' else nullcontext()
+        with autocast_ctx:
             if latents is not None:
                 pred_samples = model(latents, noisy_samples, sigma)
             else:

@@ -1,6 +1,7 @@
 import soundfile as sf
 import torch
 import numpy as np
+from contextlib import nullcontext
 
 from .hparams import *
 from .hparams_inference import *
@@ -13,17 +14,22 @@ class EncoderDecoder:
     def __init__(self, load_path_inference=None, device=None):
         download_model()
         if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            if torch.cuda.is_available():
+                self.device = torch.device('cuda')
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                self.device = torch.device('mps')
+            else:
+                self.device = torch.device('cpu')
         else:
-            self.device = device
+            self.device = torch.device(device) if isinstance(device, str) else device
         self.load_path_inference = load_path_inference
         if load_path_inference is None:
             self.load_path_inference = load_path_inference_default
         self.get_models()
-        
+
     def get_models(self):
         gen = UNet().to(self.device)
-        checkpoint = torch.load(self.load_path_inference, map_location=self.device)
+        checkpoint = torch.load(self.load_path_inference, map_location='cpu')
         gen.load_state_dict(checkpoint['gen_state_dict'], strict=False)
         self.gen = gen
 
@@ -42,7 +48,7 @@ class EncoderDecoder:
         if max_batch_size is None:
             max_batch_size = max_batch_size_encode
         return encode_audio_inference(path_or_audio, self, max_waveform_length, max_batch_size, device=self.device, extract_features=extract_features)
-    
+
     def decode(self, latent, denoising_steps=1, max_waveform_length=None, max_batch_size=None):
         '''
         latent: numpy array of latents to decode with shape [audio_channels, dim, length]
@@ -54,13 +60,9 @@ class EncoderDecoder:
         '''
         if max_waveform_length is None:
             max_waveform_length = max_waveform_length_decode
-        if max_batch_size is None: 
+        if max_batch_size is None:
             max_batch_size = max_batch_size_decode
         return decode_latent_inference(latent, self, max_waveform_length, max_batch_size, diffusion_steps=denoising_steps, device=self.device)
-
-
-
-
 
 
 # decode samples with consistency model to real/imag STFT spectrograms
@@ -77,8 +79,6 @@ def decode_to_representation(model, latents, diffusion_steps=1, device='cuda'):
     initial_noise = torch.randn((num_samples, data_channels, hop*2, sample_length)).to(device)*sigma_max
     decoded_spectrograms = reverse_diffusion(model, initial_noise, diffusion_steps, latents=latents)
     return decoded_spectrograms
-
-
 
 
 # Encode audio sample for inference
@@ -117,7 +117,12 @@ def encode_audio_inference(audio_path, trainer, max_waveform_length_encode, max_
     cropped_length = ((((audio.shape[-1]-3*hop)//hop)//downscaling_factor)*hop*downscaling_factor)+3*hop
     audio = audio[:,:cropped_length]
 
-    repr_encoder = to_representation_encoder(audio)
+    if isinstance(device, str):
+        device = torch.device(device)
+    if device.type == 'mps':
+        repr_encoder = to_representation_encoder(audio.to('cpu')).to(device)
+    else:
+        repr_encoder = to_representation_encoder(audio)
     sample_length = repr_encoder.shape[-1]
     max_sample_length = (int(max_waveform_length_encode/hop)//downscaling_factor)*downscaling_factor
 
@@ -137,12 +142,14 @@ def encode_audio_inference(audio_path, trainer, max_waveform_length_encode, max_
         repr_encoder_ls = torch.split(repr_encoder, max_batch_size, dim=0)
         latent_ls = []
         for i in range(len(repr_encoder_ls)):
-            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=mixed_precision): # disable float16 for encoding (can cause nans)
+            autocast_ctx = torch.autocast(device_type='cuda', dtype=torch.float16, enabled=mixed_precision) if (isinstance(device, torch.device) and device.type == 'cuda') else nullcontext()
+            with autocast_ctx: # disable float16 for encoding (can cause nans)
                 latent = trainer.gen.encoder(repr_encoder_ls[i], extract_features=extract_features)
             latent_ls.append(latent)
         latent = torch.cat(latent_ls, dim=0)
     else:
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=mixed_precision): # disable float16 for encoding (can cause nans)
+        autocast_ctx = torch.autocast(device_type='cuda', dtype=torch.float16, enabled=mixed_precision) if (isinstance(device, torch.device) and device.type == 'cuda') else nullcontext()
+        with autocast_ctx: # disable float16 for encoding (can cause nans)
             latent = trainer.gen.encoder(repr_encoder, extract_features=extract_features)
     # split samples
     if latent.shape[0]>1:
